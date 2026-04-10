@@ -1,12 +1,39 @@
+# =========================
+#  Python
+# =========================
 __pycache__/
 *.pyc
+
+# =========================
+#  Credentials
+# =========================
 .env
 token.json
 credentials/client_secret.json
+
+# =========================
+#  Data (generated / raw)
+# =========================
 data/raw/*
 data/exports/*
 data/logs/*
-!.gitkeep
-.DS_Store
-venv/
+
+# Keep folder structure (PRO)
+!data/raw/.gitkeep
+!data/exports/.gitkeep
+!data/logs/.gitkeep
+
+# =========================
+#  Generated files
+# =========================
 downloads/
+
+# =========================
+#  System files
+# =========================
+.DS_Store
+
+# =========================
+#  Virtual environments
+# =========================
+venv/
