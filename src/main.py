@@ -63,6 +63,25 @@ def asegurar_directorio(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def construir_nombre_carpeta_entrega(
+    submission: dict[str, Any],
+    perfil: dict[str, str],
+) -> str:
+    """
+    Construye un nombre de carpeta único por entrega usando:
+    apellido_nombre_userId_submissionId
+    """
+    nombre = limpiar_nombre_archivo(perfil.get("nombre", "") or "sin_nombre")
+    apellido = limpiar_nombre_archivo(perfil.get("apellido", "") or "sin_apellido")
+    user_id = limpiar_nombre_archivo(str(submission.get("userId", "sin_userId")))
+    submission_id = limpiar_nombre_archivo(str(submission.get("id", "sin_submissionId")))
+
+    partes = [apellido, nombre, user_id, submission_id]
+    carpeta = "_".join([p for p in partes if p])
+
+    return carpeta or f"entrega_{submission_id}"
+
+
 def seleccionar_opcion(lista: list[dict[str, Any]], tipo: str) -> dict[str, Any]:
     """
     Menú interactivo genérico para terminal.
@@ -881,10 +900,18 @@ def procesar_actividad(
 
         perfil = perfiles_cache[user_id]
 
+        nombre_carpeta_entrega = construir_nombre_carpeta_entrega(
+            submission=submission,
+            perfil=perfil,
+        )
+
+        carpeta_entrega = os.path.join(carpeta_actividad, nombre_carpeta_entrega)
+        asegurar_directorio(carpeta_entrega)
+
         archivos_descargados = descargar_adjuntos_entrega(
             submission=submission,
             drive_service=drive_service,
-            carpeta_entrega=carpeta_actividad,
+            carpeta_entrega=carpeta_entrega,
         )
 
         if archivos_descargados > 0:
