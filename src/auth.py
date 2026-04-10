@@ -9,7 +9,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
-    "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
+    "https://www.googleapis.com/auth/classroom.student-submissions.students.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
