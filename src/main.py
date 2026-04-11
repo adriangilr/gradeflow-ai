@@ -42,6 +42,7 @@ except Exception:
 
 DIAS_RECIENTES = 30
 PENALIZACION_TARDE = 10
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif"}
 
 
 # ==========================================================
@@ -778,6 +779,21 @@ def leer_texto_zip(path: str, profundidad_max: int = 15) -> str:
 
     return "\n".join(partes)
 
+def es_archivo_imagen(path: str) -> bool:
+    """
+    Detecta si el archivo es una imagen común.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    return ext in IMAGE_EXTENSIONS
+
+
+def contiene_imagenes(rutas: list[str]) -> bool:
+    """
+    Indica si entre los adjuntos descargados hay al menos una imagen.
+    """
+    return any(es_archivo_imagen(ruta) for ruta in rutas)
+
+
 
 def leer_texto_pptx(path: str) -> str:
     if Presentation is None:
@@ -816,8 +832,13 @@ def extraer_texto_archivo(path: str) -> str:
     if ext == ".zip":
         return leer_texto_zip(path)
 
+
     if ext == ".pptx":
         return leer_texto_pptx(path)
+
+
+    if ext in IMAGE_EXTENSIONS:
+        return ""
 
     return ""
 
@@ -867,6 +888,7 @@ def construir_feedback(
     penalty_late: int,
     content_score: int,
     auto_grade: int,
+    manual_review: bool,
 ) -> str:
     """
     Genera un comentario corto, claro y útil.
@@ -886,6 +908,10 @@ def construir_feedback(
     if archivos_leidos > 0:
         mensajes.append(
             f"Se leyó contenido automáticamente. Palabras detectadas: {num_palabras}."
+        )
+    elif manual_review:
+        mensajes.append(
+            "Se detectó al menos una imagen o screenshot adjunto. Se recomienda revisión manual."
         )
     else:
         mensajes.append(
@@ -919,6 +945,7 @@ def evaluar_entrega_automatica(
 
     texto_total: list[str] = []
     archivos_leidos = 0
+    manual_review = contiene_imagenes(rutas_descargadas)
 
     for ruta in rutas_descargadas:
         texto = extraer_texto_archivo(ruta)
@@ -946,6 +973,7 @@ def evaluar_entrega_automatica(
         penalty_late=penalty_late,
         content_score=content_score,
         auto_grade=auto_grade,
+        manual_review=manual_review,
     )
 
     return {
@@ -956,6 +984,7 @@ def evaluar_entrega_automatica(
         "content_score": content_score,
         "files_read_for_content": archivos_leidos,
         "detected_words": int(analisis["num_palabras"]),
+        "manual_review": str(manual_review).lower(),
     }
 
 
@@ -1067,6 +1096,7 @@ def escribir_csv_resumen(csv_path: str, filas: list[dict[str, str]]) -> None:
                 "draft_grade",
                 "attached",
                 "has_attachment",
+                "manual_review",
                 "penalty_late",
                 "content_score",
                 "auto_grade",
@@ -1222,6 +1252,7 @@ def procesar_actividad(
                 "feedback": "Alumno asignado pero sin entrega enviada. No se descargaron archivos ni se evaluó contenido.",
                 "penalty_late": 0,
                 "has_attachment": "false",
+                "manual_review": "false",
                 "content_score": 0,
                 "files_read_for_content": 0,
                 "detected_words": 0,
@@ -1229,6 +1260,7 @@ def procesar_actividad(
 
         print(f"  auto_grade: {evaluacion['auto_grade']}")
         print(f"  content_score: {evaluacion['content_score']}")
+        print(f"  manual_review: {evaluacion['manual_review']}")
         print(f"  penalty_late: {evaluacion['penalty_late']}")
 
         filas_csv.append(
@@ -1246,6 +1278,7 @@ def procesar_actividad(
                 "draft_grade": "" if submission.get("draftGrade") is None else str(submission.get("draftGrade")),
                 "attached": str(tiene_adjuntos(submission)).lower(),
                 "has_attachment": str(evaluacion["has_attachment"]).lower(),
+                "manual_review": str(evaluacion["manual_review"]).lower(),
                 "penalty_late": str(evaluacion["penalty_late"]),
                 "content_score": str(evaluacion["content_score"]),
                 "auto_grade": str(evaluacion["auto_grade"]),
@@ -1310,16 +1343,16 @@ def main() -> None:
         print(f"\n✅ Curso seleccionado: {course_display}")
 
         alcance_descarga = seleccionar_alcance_descarga()
-        print(f"\n📚 Alcance seleccionado: {alcance_descarga}")
+        print(f"\n� Alcance seleccionado: {alcance_descarga}")
 
         filtro_actividades = seleccionar_filtro_actividades()
         print(f"\n Filtro de actividades: {filtro_actividades}")
 
         modo_descarga = seleccionar_modo_descarga()
-        print(f"\n📥 Modo seleccionado: {describir_modo_descarga(modo_descarga)}")
+        print(f"\n� Modo seleccionado: {describir_modo_descarga(modo_descarga)}")
 
         formato_salida = seleccionar_formato_salida()
-        print(f"📦 Formato de salida: {formato_salida}")
+        print(f"� Formato de salida: {formato_salida}")
 
         courseworks = obtener_todas_las_actividades(classroom_service, course_id)
 
