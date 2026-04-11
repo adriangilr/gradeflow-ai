@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import csv
@@ -44,6 +43,23 @@ DIAS_RECIENTES = 30
 PENALIZACION_TARDE = 10
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif"}
 
+# Mapeo simple de MIME -> extensión para corregir nombres raros
+MIME_TO_EXT = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/zip": ".zip",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "application/json": ".json",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/tiff": ".tiff",
+}
+
 
 # ==========================================================
 # Utilidades generales
@@ -51,11 +67,12 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", "
 
 def limpiar_nombre_archivo(texto: str) -> str:
     """
-    Limpia nombres de archivos o carpetas para evitar errores
-    por caracteres problemáticos.
+    Limpia nombres de archivos o carpetas.
+    Evita 'sin_nombre' usando fallback más inteligente.
     """
-    if not texto:
-        return "sin_nombre"
+    if not texto or not texto.strip():
+        from datetime import datetime
+        return f"archivo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     texto = texto.strip()
     reemplazos = {
@@ -73,9 +90,14 @@ def limpiar_nombre_archivo(texto: str) -> str:
     for viejo, nuevo in reemplazos.items():
         texto = texto.replace(viejo, nuevo)
 
+    import re
     texto = re.sub(r"\s+", " ", texto).strip()
-    return texto or "sin_nombre"
 
+    if not texto:
+        from datetime import datetime
+        return f"archivo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    return texto
 
 def asegurar_directorio(path: str) -> None:
     """
@@ -83,6 +105,27 @@ def asegurar_directorio(path: str) -> None:
     """
     os.makedirs(path, exist_ok=True)
 
+
+def asegurar_extension(nombre: str, mime_type: str) -> str:
+    """
+    Garantiza que el nombre tenga una extensión coherente con el MIME.
+    Esto evita casos donde Classroom/Drive entrega títulos raros como .pod
+    o nombres sin extensión.
+    """
+    base, ext = os.path.splitext(nombre)
+    ext_actual = ext.lower()
+    ext_correcta = MIME_TO_EXT.get((mime_type or "").lower())
+
+    if ext_correcta is None:
+        return nombre
+
+    if not ext_actual:
+        return f"{base}{ext_correcta}"
+
+    if ext_actual != ext_correcta:
+        return f"{base}{ext_correcta}"
+
+    return nombre
 
 
 def construir_nombre_carpeta_entrega(
@@ -268,16 +311,57 @@ def describir_modo_descarga(modo_descarga: str) -> str:
 # Descarga de Drive
 # ==========================================================
 
-def download_file(drive_service, file_id: str, file_name: str, folder: str) -> str | None:
+def obtener_metadata_archivo_drive(drive_service, file_id: str) -> dict[str, str]:
+    """
+    Lee metadata real del archivo en Drive para usar el nombre correcto
+    y el mimeType real, en lugar de confiar ciegamente en 'title'.
+    """
+    try:
+        meta = (
+            drive_service.files()
+            .get(fileId=file_id, fields="id,name,mimeType,fileExtension")
+            .execute()
+        )
+        return {
+            "name": meta.get("name", ""),
+            "mimeType": meta.get("mimeType", ""),
+            "fileExtension": meta.get("fileExtension", ""),
+        }
+    except HttpError:
+        return {
+            "name": "",
+            "mimeType": "",
+            "fileExtension": "",
+        }
+
+
+def download_file(
+    drive_service,
+    file_id: str,
+    file_name: str,
+    folder: str,
+    mime_type: str = "",
+) -> str | None:
     """
     Descarga un archivo de Drive al folder indicado.
+    Usa metadata real de Drive para corregir extensiones raras o faltantes.
     """
     asegurar_directorio(folder)
 
-    safe_name = limpiar_nombre_archivo(file_name)
-    file_path = os.path.join(folder, safe_name)
-
     try:
+        meta = obtener_metadata_archivo_drive(drive_service, file_id)
+
+        # Fuente de verdad:
+        # 1) name real de Drive
+        # 2) si no viene, usar file_name recibido
+        real_name = meta.get("name") or file_name or "archivo"
+        real_mime = meta.get("mimeType") or mime_type or ""
+
+        safe_name = limpiar_nombre_archivo(real_name)
+        safe_name = asegurar_extension(safe_name, real_mime)
+
+        file_path = os.path.join(folder, safe_name)
+
         request = drive_service.files().get_media(fileId=file_id)
         with io.FileIO(file_path, "wb") as fh:
             downloader = MediaIoBaseDownload(fh, request)
@@ -290,7 +374,7 @@ def download_file(drive_service, file_id: str, file_name: str, folder: str) -> s
         return file_path
 
     except HttpError as err:
-        print(f"      ❌ Error al descargar '{safe_name}': {err}")
+        print(f"      ❌ Error al descargar '{file_name}': {err}")
         return None
 
 
@@ -779,6 +863,7 @@ def leer_texto_zip(path: str, profundidad_max: int = 15) -> str:
 
     return "\n".join(partes)
 
+
 def es_archivo_imagen(path: str) -> bool:
     """
     Detecta si el archivo es una imagen común.
@@ -792,7 +877,6 @@ def contiene_imagenes(rutas: list[str]) -> bool:
     Indica si entre los adjuntos descargados hay al menos una imagen.
     """
     return any(es_archivo_imagen(ruta) for ruta in rutas)
-
 
 
 def leer_texto_pptx(path: str) -> str:
@@ -832,10 +916,8 @@ def extraer_texto_archivo(path: str) -> str:
     if ext == ".zip":
         return leer_texto_zip(path)
 
-
     if ext == ".pptx":
         return leer_texto_pptx(path)
-
 
     if ext in IMAGE_EXTENSIONS:
         return ""
@@ -1028,6 +1110,7 @@ def descargar_adjuntos_entrega(
 
             file_id = drive_meta.get("id")
             title = drive_meta.get("title", "archivo")
+            mime_type = drive_meta.get("mimeType", "")
 
             print(f"    - DriveFile: {title} | id={file_id}")
 
@@ -1037,6 +1120,7 @@ def descargar_adjuntos_entrega(
                     file_id=file_id,
                     file_name=title,
                     folder=carpeta_entrega,
+                    mime_type=mime_type,
                 )
                 if ruta:
                     rutas_descargadas.append(ruta)
@@ -1343,16 +1427,16 @@ def main() -> None:
         print(f"\n✅ Curso seleccionado: {course_display}")
 
         alcance_descarga = seleccionar_alcance_descarga()
-        print(f"\n� Alcance seleccionado: {alcance_descarga}")
+        print(f"\n📚 Alcance seleccionado: {alcance_descarga}")
 
         filtro_actividades = seleccionar_filtro_actividades()
         print(f"\n Filtro de actividades: {filtro_actividades}")
 
         modo_descarga = seleccionar_modo_descarga()
-        print(f"\n� Modo seleccionado: {describir_modo_descarga(modo_descarga)}")
+        print(f"\n📥 Modo seleccionado: {describir_modo_descarga(modo_descarga)}")
 
         formato_salida = seleccionar_formato_salida()
-        print(f"� Formato de salida: {formato_salida}")
+        print(f"📦 Formato de salida: {formato_salida}")
 
         courseworks = obtener_todas_las_actividades(classroom_service, course_id)
 
