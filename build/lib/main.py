@@ -17,6 +17,10 @@ from googleapiclient.http import MediaIoBaseDownload
 from src.auth import get_credentials
 from src.config import ensure_directories, get_settings
 
+from src.utils.naming import construir_nombre_portfolio
+from src.config import NAMING_MODE, MAX_FOLDER_NAME_LEN
+
+
 try:
     from PyPDF2 import PdfReader  # type: ignore
 except Exception:
@@ -27,6 +31,10 @@ try:
 except Exception:
     Document = None
 
+try:
+    from pptx import Presentation  # type: ignore
+except Exception:
+    Presentation = None
 
 # ==========================================================
 # Configuración general
@@ -75,23 +83,23 @@ def asegurar_directorio(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+
 def construir_nombre_carpeta_entrega(
-    submission: dict[str, Any],
-    perfil: dict[str, str],
+    submission: dict,
+    perfil: dict,
 ) -> str:
-    """
-    Construye un nombre de carpeta único por entrega usando:
-    apellido_nombre_userId_submissionId
-    """
-    nombre = limpiar_nombre_archivo(perfil.get("nombre", "") or "sin_nombre")
-    apellido = limpiar_nombre_archivo(perfil.get("apellido", "") or "sin_apellido")
-    user_id = limpiar_nombre_archivo(str(submission.get("userId", "sin_userId")))
-    submission_id = limpiar_nombre_archivo(str(submission.get("id", "sin_submissionId")))
 
-    partes = [apellido, nombre, user_id, submission_id]
-    carpeta = "_".join([p for p in partes if p])
+    nombre = perfil.get("nombre", "")
+    apellido = perfil.get("apellido", "")
+    user_id = str(submission.get("userId", ""))
 
-    return carpeta or f"entrega_{submission_id}"
+    return construir_nombre_portfolio(
+        nombre=nombre,
+        apellido=apellido,
+        user_id=user_id,
+        modo=NAMING_MODE,
+        max_len=MAX_FOLDER_NAME_LEN,
+    )
 
 
 def seleccionar_opcion(lista: list[dict[str, Any]], tipo: str) -> dict[str, Any]:
@@ -211,7 +219,7 @@ def seleccionar_modo_descarga() -> str:
     Define qué entregas se descargarán.
     """
     opciones = [
-        {"id": "all", "display_name": "Bajar todas las entregas activas (TURNED_IN)"},
+        {"id": "all", "display_name": "Incluir todos los alumnos (entregados y no entregados)"},
         {
             "id": "late_ungraded",
             "display_name": "Bajar solo tardías y no evaluadas",
@@ -418,12 +426,36 @@ def es_tardia(submission: dict[str, Any]) -> bool:
     )
 
 
+def estado_legible_entrega(submission: dict[str, Any]) -> str:
+    """
+    Traduce el estado técnico de Classroom a algo más entendible.
+    """
+    state = (submission.get("state") or "").upper()
+
+    mapa = {
+        "TURNED_IN": "entregado",
+        "CREATED": "asignado_sin_entregar",
+        "RETURNED": "devuelto",
+        "RECLAIMED_BY_STUDENT": "reclamado_por_alumno",
+    }
+    return mapa.get(state, state.lower() or "desconocido")
+
+
+def se_puede_descargar_entrega(submission: dict[str, Any]) -> bool:
+    """
+    Solo tiene sentido intentar descargar adjuntos cuando la entrega fue enviada.
+    """
+    return submission.get("state") == "TURNED_IN"
+
+
 def filtrar_entregas(submissions: list[dict[str, Any]], modo_descarga: str) -> list[dict[str, Any]]:
     """
     Aplica el filtro elegido a la lista de entregas.
     """
     if modo_descarga == "all":
-        return [s for s in submissions if s.get("state") == "TURNED_IN"]
+        # Incluye a todos los alumnos de la actividad:
+        # entregados, asignados sin entregar, devueltos, etc.
+        return submissions
 
     if modo_descarga == "resubmitted":
         return [s for s in submissions if es_reentregada(s)]
@@ -747,6 +779,24 @@ def leer_texto_zip(path: str, profundidad_max: int = 15) -> str:
     return "\n".join(partes)
 
 
+def leer_texto_pptx(path: str) -> str:
+    if Presentation is None:
+        return ""
+
+    try:
+        prs = Presentation(path)
+        textos = []
+
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, "text"):
+                    textos.append(shape.text)
+
+        return "\n".join(textos)
+    except Exception:
+        return ""
+
+
 def extraer_texto_archivo(path: str) -> str:
     """
     Lee texto de varios tipos de archivo comunes.
@@ -765,6 +815,9 @@ def extraer_texto_archivo(path: str) -> str:
 
     if ext == ".zip":
         return leer_texto_zip(path)
+
+    if ext == ".pptx":
+        return leer_texto_pptx(path)
 
     return ""
 
@@ -1008,6 +1061,10 @@ def escribir_csv_resumen(csv_path: str, filas: list[dict[str, str]]) -> None:
                 "correo",
                 "nombre",
                 "apellido",
+                "estado_entrega",
+                "late",
+                "assigned_grade",
+                "draft_grade",
                 "attached",
                 "has_attachment",
                 "penalty_late",
@@ -1093,6 +1150,12 @@ def procesar_actividad(
         carpeta_base,
         f"{limpiar_nombre_archivo(coursework_title)}_{coursework_id}",
     )
+
+    # Evita folders duplicados cuando se reprocesa la misma actividad.
+    # Si la carpeta ya existe, se reconstruye limpia con la convención actual.
+    if os.path.exists(carpeta_actividad):
+        shutil.rmtree(carpeta_actividad)
+
     asegurar_directorio(carpeta_actividad)
 
     for submission in entregas_filtradas:
@@ -1136,19 +1199,33 @@ def procesar_actividad(
         carpeta_entrega = os.path.join(carpeta_actividad, nombre_carpeta_entrega)
         asegurar_directorio(carpeta_entrega)
 
-        rutas_descargadas = descargar_adjuntos_entrega(
-            submission=submission,
-            drive_service=drive_service,
-            carpeta_entrega=carpeta_entrega,
-        )
+        rutas_descargadas: list[str] = []
 
-        if rutas_descargadas:
-            estadisticas["archivos_descargados"] += len(rutas_descargadas)
+        if se_puede_descargar_entrega(submission):
+            rutas_descargadas = descargar_adjuntos_entrega(
+                submission=submission,
+                drive_service=drive_service,
+                carpeta_entrega=carpeta_entrega,
+            )
 
-        evaluacion = evaluar_entrega_automatica(
-            submission=submission,
-            rutas_descargadas=rutas_descargadas,
-        )
+            if rutas_descargadas:
+                estadisticas["archivos_descargados"] += len(rutas_descargadas)
+
+            evaluacion = evaluar_entrega_automatica(
+                submission=submission,
+                rutas_descargadas=rutas_descargadas,
+            )
+        else:
+            print("  adjuntos: no aplica, alumno sin entrega enviada")
+            evaluacion = {
+                "auto_grade": 0,
+                "feedback": "Alumno asignado pero sin entrega enviada. No se descargaron archivos ni se evaluó contenido.",
+                "penalty_late": 0,
+                "has_attachment": "false",
+                "content_score": 0,
+                "files_read_for_content": 0,
+                "detected_words": 0,
+            }
 
         print(f"  auto_grade: {evaluacion['auto_grade']}")
         print(f"  content_score: {evaluacion['content_score']}")
@@ -1163,6 +1240,10 @@ def procesar_actividad(
                 "correo": perfil.get("correo", ""),
                 "nombre": perfil.get("nombre", ""),
                 "apellido": perfil.get("apellido", ""),
+                "estado_entrega": estado_legible_entrega(submission),
+                "late": str(bool(submission.get("late", False))).lower(),
+                "assigned_grade": "" if submission.get("assignedGrade") is None else str(submission.get("assignedGrade")),
+                "draft_grade": "" if submission.get("draftGrade") is None else str(submission.get("draftGrade")),
                 "attached": str(tiene_adjuntos(submission)).lower(),
                 "has_attachment": str(evaluacion["has_attachment"]).lower(),
                 "penalty_late": str(evaluacion["penalty_late"]),
@@ -1232,7 +1313,7 @@ def main() -> None:
         print(f"\n📚 Alcance seleccionado: {alcance_descarga}")
 
         filtro_actividades = seleccionar_filtro_actividades()
-        print(f"🧩 Filtro de actividades: {filtro_actividades}")
+        print(f"\n Filtro de actividades: {filtro_actividades}")
 
         modo_descarga = seleccionar_modo_descarga()
         print(f"\n📥 Modo seleccionado: {describir_modo_descarga(modo_descarga)}")
@@ -1345,6 +1426,7 @@ def main() -> None:
         print(f"Entregas que cumplieron filtro: {estadisticas['entregas_filtradas']}")
         print(f"Archivos descargados: {estadisticas['archivos_descargados']}")
         print(f"Filas en CSV: {len(filas_csv)}")
+        print("Nota: en modo 'all' ahora el CSV incluye también alumnos sin entregar.")
         print(f"Carpeta base: {carpeta_base}")
         if formato_salida == "zip_and_folder":
             print(f"ZIP: downloads/{nombre_zip}.zip")

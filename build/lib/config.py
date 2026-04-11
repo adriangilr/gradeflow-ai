@@ -7,6 +7,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+# Naming config (portfolio ready)
+NAMING_MODE = "portfolio"   # opciones: portfolio | corto | completo
+MAX_FOLDER_NAME_LEN = 40
+
+
 load_dotenv()
 
 

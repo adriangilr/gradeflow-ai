@@ -17,6 +17,10 @@ from googleapiclient.http import MediaIoBaseDownload
 from src.auth import get_credentials
 from src.config import ensure_directories, get_settings
 
+from src.utils.naming import construir_nombre_portfolio
+from src.config import NAMING_MODE, MAX_FOLDER_NAME_LEN
+
+
 try:
     from PyPDF2 import PdfReader  # type: ignore
 except Exception:
@@ -27,6 +31,10 @@ try:
 except Exception:
     Document = None
 
+try:
+    from pptx import Presentation  # type: ignore
+except Exception:
+    Presentation = None
 
 # ==========================================================
 # Configuración general
@@ -75,23 +83,23 @@ def asegurar_directorio(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+
 def construir_nombre_carpeta_entrega(
-    submission: dict[str, Any],
-    perfil: dict[str, str],
+    submission: dict,
+    perfil: dict,
 ) -> str:
-    """
-    Construye un nombre de carpeta único por entrega usando:
-    apellido_nombre_userId_submissionId
-    """
-    nombre = limpiar_nombre_archivo(perfil.get("nombre", "") or "sin_nombre")
-    apellido = limpiar_nombre_archivo(perfil.get("apellido", "") or "sin_apellido")
-    user_id = limpiar_nombre_archivo(str(submission.get("userId", "sin_userId")))
-    submission_id = limpiar_nombre_archivo(str(submission.get("id", "sin_submissionId")))
 
-    partes = [apellido, nombre, user_id, submission_id]
-    carpeta = "_".join([p for p in partes if p])
+    nombre = perfil.get("nombre", "")
+    apellido = perfil.get("apellido", "")
+    user_id = str(submission.get("userId", ""))
 
-    return carpeta or f"entrega_{submission_id}"
+    return construir_nombre_portfolio(
+        nombre=nombre,
+        apellido=apellido,
+        user_id=user_id,
+        modo=NAMING_MODE,
+        max_len=MAX_FOLDER_NAME_LEN,
+    )
 
 
 def seleccionar_opcion(lista: list[dict[str, Any]], tipo: str) -> dict[str, Any]:
@@ -771,6 +779,24 @@ def leer_texto_zip(path: str, profundidad_max: int = 15) -> str:
     return "\n".join(partes)
 
 
+def leer_texto_pptx(path: str) -> str:
+    if Presentation is None:
+        return ""
+
+    try:
+        prs = Presentation(path)
+        textos = []
+
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, "text"):
+                    textos.append(shape.text)
+
+        return "\n".join(textos)
+    except Exception:
+        return ""
+
+
 def extraer_texto_archivo(path: str) -> str:
     """
     Lee texto de varios tipos de archivo comunes.
@@ -789,6 +815,9 @@ def extraer_texto_archivo(path: str) -> str:
 
     if ext == ".zip":
         return leer_texto_zip(path)
+
+    if ext == ".pptx":
+        return leer_texto_pptx(path)
 
     return ""
 
@@ -1121,6 +1150,12 @@ def procesar_actividad(
         carpeta_base,
         f"{limpiar_nombre_archivo(coursework_title)}_{coursework_id}",
     )
+
+    # Evita folders duplicados cuando se reprocesa la misma actividad.
+    # Si la carpeta ya existe, se reconstruye limpia con la convención actual.
+    if os.path.exists(carpeta_actividad):
+        shutil.rmtree(carpeta_actividad)
+
     asegurar_directorio(carpeta_actividad)
 
     for submission in entregas_filtradas:

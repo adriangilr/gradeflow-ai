@@ -12,4 +12,5 @@ src/classroom_downloader.egg-info/SOURCES.txt
 src/classroom_downloader.egg-info/dependency_links.txt
 src/classroom_downloader.egg-info/requires.txt
 src/classroom_downloader.egg-info/top_level.txt
+src/utils/naming.py
 tests/test_paths.py
