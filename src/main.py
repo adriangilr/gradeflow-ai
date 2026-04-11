@@ -1278,7 +1278,7 @@ def main() -> None:
         print(f"\n📚 Alcance seleccionado: {alcance_descarga}")
 
         filtro_actividades = seleccionar_filtro_actividades()
-        print(f"🧩 Filtro de actividades: {filtro_actividades}")
+        print(f"\n Filtro de actividades: {filtro_actividades}")
 
         modo_descarga = seleccionar_modo_descarga()
         print(f"\n📥 Modo seleccionado: {describir_modo_descarga(modo_descarga)}")
