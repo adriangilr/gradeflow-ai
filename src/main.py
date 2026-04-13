@@ -131,6 +131,46 @@ def limpiar_nombre_archivo(texto: str) -> str:
 
     return texto
 
+
+def slugify_nombre(texto: str) -> str:
+    """
+    Convierte texto a formato carpeta amigable:
+    minusculas, guiones y sin caracteres raros.
+    """
+    texto = limpiar_nombre_archivo(texto).lower()
+    texto = texto.replace("_", " ")
+    texto = re.sub(r"[^a-z0-9]+", "-", texto)
+    texto = re.sub(r"-+", "-", texto).strip("-")
+    return texto or "sin-nombre"
+
+
+def construir_slug_curso(texto: str, course_id: str) -> str:
+    """
+    Genera el nombre visible de la carpeta raíz del curso.
+    Ejemplo:
+    'Seminario Ing. de SW' + id -> 'Seminario Ing. de SW_840182924161'
+    """
+    nombre_curso = limpiar_nombre_archivo(texto) or "curso"
+    return f"{nombre_curso}_{course_id}"
+
+
+def construir_slug_actividad(texto: str, actividad_id: str) -> str:
+    """
+    Genera el nombre visible de la carpeta de la actividad.
+    Ejemplo:
+    'P01 - Timing plan' + id -> 'P01 - Timing plan_840182924183'
+    """
+    nombre_actividad = limpiar_nombre_archivo(texto) or "actividad"
+    return f"{nombre_actividad}_{actividad_id}"
+
+
+def obtener_timestamp_carpeta() -> str:
+    """
+    Timestamp corto y estable para nombres de carpeta.
+    Formato: YYYYMMDD_HHMM
+    """
+    return datetime.now().strftime("%Y%m%d_%H%M")
+
 def asegurar_directorio(path: str) -> None:
     """
     Crea el directorio si no existe.
@@ -1549,7 +1589,7 @@ def procesar_actividad(
         print("No hay entregas que coincidan con el filtro para esta actividad.")
         return
 
-    nombre_carpeta_actividad = f"{limpiar_nombre_archivo(coursework_title)}_{coursework_id}"
+    nombre_carpeta_actividad = construir_slug_actividad(coursework_title, coursework_id)
 
     # Si la carpeta_base ya apunta exactamente a esta actividad
     # (caso descarga de una sola actividad), reutilízala tal cual.
@@ -1734,6 +1774,10 @@ def main() -> None:
         selected_course = seleccionar_opcion(courses, "un curso")
         course_id = selected_course["id"]
         course_name = limpiar_nombre_archivo(selected_course.get("name", f"curso_{course_id}"))
+        course_slug = construir_slug_curso(
+            selected_course.get("name", f"curso_{course_id}"),
+            course_id,
+        )
         course_display = selected_course.get("display_name", selected_course.get("name", "Curso"))
 
         print(f"\n✅ Curso seleccionado: {course_display}")
@@ -1773,7 +1817,7 @@ def main() -> None:
         )
 
         carpeta_curso = os.path.normpath(
-            os.path.join(settings.download_root, f"{course_name}_{course_id}")
+            os.path.join(settings.download_root, course_slug)
         )
 
         perfiles_cache: dict[str, dict[str, str]] = {}
@@ -1790,15 +1834,16 @@ def main() -> None:
             print(f"\n✅ Actividad seleccionada: {selected_coursework['display_name']}")
 
             coursework_title = selected_coursework.get("title", f"actividad_{selected_coursework['id']}")
-            coursework_folder_name = (
-                f"{limpiar_nombre_archivo(coursework_title)}_{selected_coursework['id']}"
+            coursework_folder_name = construir_slug_actividad(
+                coursework_title,
+                selected_coursework["id"],
             )
 
-            # Importante:
-            # para una sola actividad, la carpeta base de esta ejecución NO debe ser la carpeta
-            # histórica completa del curso. Se crea una salida dedicada únicamente para esa actividad.
+            # Para una sola actividad también se reconstruye la carpeta del curso completa,
+            # de modo que el ZIP conserve la estructura:
+            # Curso_ID/Actividad_ID/alumno/
             carpeta_base = preparar_directorio_salida(
-                os.path.join(carpeta_curso, coursework_folder_name),
+                carpeta_curso,
                 limpiar_si_existe=True,
             )
 
@@ -1816,7 +1861,7 @@ def main() -> None:
             )
 
             nombre_csv = "resumen_entregas.csv"
-            nombre_zip = coursework_folder_name
+            nombre_zip = course_slug
 
         elif alcance_descarga == "all_courseworks":
             # Para exportación completa sí se usa la carpeta del curso,
@@ -1848,7 +1893,7 @@ def main() -> None:
                 )
 
             nombre_csv = "resumen_todas_las_actividades.csv"
-            nombre_zip = f"{course_name}_{course_id}_todas_las_actividades"
+            nombre_zip = course_slug
 
         else:
             print("❌ Alcance de descarga no reconocido.")
