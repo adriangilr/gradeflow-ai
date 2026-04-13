@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import json
 import io
 import os
+import copy
 import re
 import shutil
 import zipfile
@@ -40,8 +42,38 @@ except Exception:
 # ==========================================================
 
 DIAS_RECIENTES = 30
-PENALIZACION_TARDE = 10
+AUTOGRADING_CONFIG_FILENAME = "autograding_rules.json"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif"}
+
+DEFAULT_AUTOGRADING_CONFIG = {
+    "weights": {
+        "delivery_valid": 40,
+        "evidence_file_or_text": 20,
+        "readable_content": 20,
+        "minimum_sufficiency": 20,
+    },
+    "keywords": {
+        "enabled": True,
+        "list": ["control", "sistema", "resumen"],
+        "minimum_matches": 1,
+        "required_for_delivery_valid": False,
+    },
+    "minimum_sufficiency": {
+        "min_words_partial": 10,
+        "min_words_full": 50,
+        "min_chars_partial": 80,
+        "min_chars_full": 300,
+        "partial_score": 10,
+        "full_score": 20,
+    },
+    "late_policy": {
+        "enabled": True,
+        "minor_days_threshold": 5,
+        "minor_penalty": 5,
+        "major_penalty": 10,
+        "fallback_penalty_when_late_without_due_date": 5,
+    },
+}
 
 # Mapeo simple de MIME -> extensión para corregir nombres raros
 MIME_TO_EXT = {
@@ -104,6 +136,20 @@ def asegurar_directorio(path: str) -> None:
     Crea el directorio si no existe.
     """
     os.makedirs(path, exist_ok=True)
+
+
+def preparar_directorio_salida(path: str, limpiar_si_existe: bool = False) -> str:
+    """
+    Prepara un directorio de salida controlado.
+    Si limpiar_si_existe=True, elimina por completo el contenido previo.
+    """
+    path = os.path.normpath(path)
+
+    if limpiar_si_existe and os.path.exists(path):
+        shutil.rmtree(path)
+
+    asegurar_directorio(path)
+    return path
 
 
 def asegurar_extension(nombre: str, mime_type: str) -> str:
@@ -189,6 +235,51 @@ def ahora_utc() -> datetime:
     Regresa la fecha actual en UTC.
     """
     return datetime.now(timezone.utc)
+
+
+def cargar_config_autograding() -> dict[str, Any]:
+    """
+    Carga reglas de autograding desde JSON.
+    Si no existe o falla, usa la configuración por defecto.
+    """
+    posibles_rutas = [
+        os.path.join(os.path.dirname(__file__), AUTOGRADING_CONFIG_FILENAME),
+        os.path.join(os.getcwd(), AUTOGRADING_CONFIG_FILENAME),
+    ]
+
+    for ruta in posibles_rutas:
+        if os.path.exists(ruta):
+            try:
+                with open(ruta, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                if isinstance(data, dict):
+                    return combinar_config(DEFAULT_AUTOGRADING_CONFIG, data)
+            except Exception as err:
+                print(f"⚠️ No se pudo leer la configuración de autograding en '{ruta}': {err}")
+
+    return copy.deepcopy(DEFAULT_AUTOGRADING_CONFIG)
+
+
+def combinar_config(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Mezcla profunda simple de diccionarios."""
+    resultado: dict[str, Any] = {}
+
+    for key, value in base.items():
+        if isinstance(value, dict):
+            extra_value = extra.get(key, {})
+            if isinstance(extra_value, dict):
+                resultado[key] = combinar_config(value, extra_value)
+            else:
+                resultado[key] = copy.deepcopy(value)
+        else:
+            resultado[key] = extra.get(key, value)
+
+    for key, value in extra.items():
+        if key not in resultado:
+            resultado[key] = value
+
+    return resultado
 
 
 # ==========================================================
@@ -925,41 +1016,143 @@ def extraer_texto_archivo(path: str) -> str:
     return ""
 
 
-def analizar_contenido_texto(texto: str) -> dict[str, Any]:
+def analizar_contenido_texto(
+    texto: str,
+    autograding_config: dict[str, Any],
+) -> dict[str, Any]:
     """
-    Hace una evaluación simple y conservadora del contenido.
-    El score es genérico para no inventar una rúbrica específica.
+    Analiza el texto extraído con una lógica más simple:
+    - detecta si el contenido es legible
+    - calcula suficiencia mínima configurable
+    - detecta palabras clave opcionales
     """
     texto_limpio = re.sub(r"\s+", " ", texto or "").strip()
     palabras = re.findall(r"\b\w+\b", texto_limpio, flags=re.UNICODE)
     num_palabras = len(palabras)
     num_caracteres = len(texto_limpio)
 
-    content_score = 0
+    weights = autograding_config.get("weights", {})
+    suff_cfg = autograding_config.get("minimum_sufficiency", {})
+    keywords_cfg = autograding_config.get("keywords", {})
 
-    if num_palabras >= 30:
-        content_score += 10
-    elif num_palabras >= 10:
-        content_score += 5
+    contenido_legible = bool(texto_limpio)
 
-    if num_palabras >= 100:
-        content_score += 10
-    elif num_palabras >= 50:
-        content_score += 5
+    min_words_partial = int(suff_cfg.get("min_words_partial", 10))
+    min_words_full = int(suff_cfg.get("min_words_full", 50))
+    min_chars_partial = int(suff_cfg.get("min_chars_partial", 80))
+    min_chars_full = int(suff_cfg.get("min_chars_full", 300))
+    partial_score = int(suff_cfg.get("partial_score", 10))
+    full_score = int(suff_cfg.get("full_score", weights.get("minimum_sufficiency", 20)))
 
-    if num_caracteres >= 1000:
-        content_score += 10
-    elif num_caracteres >= 300:
-        content_score += 5
+    if num_palabras >= min_words_full or num_caracteres >= min_chars_full:
+        sufficiency_score = full_score
+        sufficiency_level = "full"
+    elif num_palabras >= min_words_partial or num_caracteres >= min_chars_partial:
+        sufficiency_score = partial_score
+        sufficiency_level = "partial"
+    else:
+        sufficiency_score = 0
+        sufficiency_level = "low"
 
-    content_score = min(content_score, 30)
+    keyword_list = keywords_cfg.get("list", [])
+    if not isinstance(keyword_list, list):
+        keyword_list = []
+
+    keyword_hits: list[str] = []
+    if keywords_cfg.get("enabled", True):
+        texto_lower = texto_limpio.lower()
+        for keyword in keyword_list:
+            kw = str(keyword).strip().lower()
+            if kw and kw in texto_lower:
+                keyword_hits.append(kw)
+
+    minimum_matches = int(keywords_cfg.get("minimum_matches", 1))
+    keywords_ok = len(keyword_hits) >= minimum_matches if keyword_list else True
 
     return {
         "texto_extraido": texto_limpio,
         "num_palabras": num_palabras,
         "num_caracteres": num_caracteres,
-        "content_score": content_score,
+        "contenido_legible": contenido_legible,
+        "sufficiency_score": sufficiency_score,
+        "sufficiency_level": sufficiency_level,
+        "keyword_hits": keyword_hits,
+        "keywords_ok": keywords_ok,
     }
+
+
+def construir_due_datetime(coursework: dict[str, Any]) -> datetime | None:
+    due_date = coursework.get("dueDate")
+    if not isinstance(due_date, dict):
+        return None
+
+    year = due_date.get("year")
+    month = due_date.get("month")
+    day = due_date.get("day")
+    if not (year and month and day):
+        return None
+
+    due_time = coursework.get("dueTime") or {}
+    hours = due_time.get("hours", 23)
+    minutes = due_time.get("minutes", 59)
+    seconds = due_time.get("seconds", 59)
+
+    try:
+        return datetime(
+            int(year),
+            int(month),
+            int(day),
+            int(hours),
+            int(minutes),
+            int(seconds),
+            tzinfo=timezone.utc,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def obtener_timestamp_entrega(submission: dict[str, Any]) -> datetime | None:
+    candidatos = [
+        submission.get("updateTime"),
+        submission.get("submissionTime"),
+        submission.get("turnInTime"),
+        submission.get("creationTime"),
+    ]
+    for valor in candidatos:
+        dt = parse_google_datetime(valor)
+        if dt is not None:
+            return dt
+    return None
+
+
+def calcular_penalizacion_tardanza(
+    submission: dict[str, Any],
+    coursework: dict[str, Any],
+    autograding_config: dict[str, Any],
+) -> tuple[int, int]:
+    late_policy = autograding_config.get("late_policy", {})
+    if not late_policy.get("enabled", True):
+        return 0, 0
+
+    if not bool(submission.get("late", False)):
+        return 0, 0
+
+    due_dt = construir_due_datetime(coursework)
+    entrega_dt = obtener_timestamp_entrega(submission)
+
+    if due_dt is None or entrega_dt is None:
+        penalty = int(late_policy.get("fallback_penalty_when_late_without_due_date", 5))
+        return penalty, 0
+
+    delta = entrega_dt - due_dt
+    total_dias = max(0, int((delta.total_seconds() + 86399) // 86400))
+
+    threshold = int(late_policy.get("minor_days_threshold", 5))
+    minor_penalty = int(late_policy.get("minor_penalty", 5))
+    major_penalty = int(late_policy.get("major_penalty", 10))
+
+    penalty = minor_penalty if total_dias <= threshold else major_penalty
+    return penalty, total_dias
 
 
 def construir_feedback(
@@ -968,61 +1161,116 @@ def construir_feedback(
     archivos_leidos: int,
     num_palabras: int,
     penalty_late: int,
-    content_score: int,
     auto_grade: int,
     manual_review: bool,
+    contenido_legible: bool,
+    sufficiency_level: str,
+    keyword_hits: list[str],
 ) -> str:
     """
-    Genera un comentario corto, claro y útil.
+    Genera feedback más limpio y profesional.
+    Evita mensajes basura cuando sí existe evidencia, pero no fue interpretable.
     """
     mensajes: list[str] = []
 
+    # 1) Evidencia
     if has_attachment:
-        mensajes.append("Entrega con adjunto.")
+        mensajes.append("Se recibió evidencia de entrega.")
     else:
-        mensajes.append("Entrega sin adjuntos.")
+        mensajes.append("No se detectó evidencia adjunta ni texto interpretable.")
 
-    if late:
+    # 2) Tardanza
+    if late and penalty_late > 0:
         mensajes.append(f"Se aplicó penalización por tardanza (-{penalty_late}).")
     else:
         mensajes.append("Sin penalización por tardanza.")
 
-    if archivos_leidos > 0:
+    # 3) Estado de lectura
+    if manual_review:
         mensajes.append(
-            f"Se leyó contenido automáticamente. Palabras detectadas: {num_palabras}."
+            "La evidencia requiere revisión manual porque incluye imágenes o formatos no interpretables automáticamente."
         )
-    elif manual_review:
+    elif archivos_leidos > 0 and contenido_legible:
         mensajes.append(
-            "Se detectó al menos una imagen o screenshot adjunto. Se recomienda revisión manual."
+            f"Se detectó contenido legible automáticamente ({num_palabras} palabras aprox.)."
+        )
+    elif has_attachment:
+        mensajes.append(
+            "Se recibió evidencia, pero no fue posible interpretarla automáticamente con las librerías actuales."
         )
     else:
         mensajes.append(
-            "No fue posible leer contenido útil de los archivos; revisa formato o librerías instaladas."
+            "No fue posible recuperar contenido legible para evaluación automática."
         )
 
-    if content_score >= 25:
-        mensajes.append("Contenido detectado con buena extensión.")
-    elif content_score >= 10:
-        mensajes.append("Contenido detectado con extensión media.")
-    else:
-        mensajes.append("Contenido detectado muy corto o insuficiente.")
+    # 4) Keywords: solo se informan si sí existen
+    if keyword_hits:
+        mensajes.append(f"Palabras clave detectadas: {', '.join(keyword_hits)}.")
 
+    # 5) Suficiencia
+    if sufficiency_level == "full":
+        mensajes.append("El contenido cumple suficiencia completa según los umbrales configurados.")
+    elif sufficiency_level == "partial":
+        mensajes.append("El contenido cumple suficiencia mínima parcial; conviene revisión rápida.")
+    else:
+        mensajes.append("El contenido detectado es breve o insuficiente según los umbrales configurados.")
+
+    # 6) Cierre
     mensajes.append(f"Calificación automática sugerida: {auto_grade}/100.")
     return " ".join(mensajes)
+
+
+def construir_feedback_corto(
+    late: bool,
+    manual_review: bool,
+    contenido_legible: bool,
+    sufficiency_level: str,
+) -> str:
+    """
+    Genera feedback compacto tipo etiquetas para CSV y dashboards.
+    Ejemplos:
+    - suficiente
+    - parcial
+    - insuficiente
+    - tardía | manual_review | insuficiente
+    """
+    tags: list[str] = []
+
+    if late:
+        tags.append("tardía")
+
+    if manual_review:
+        tags.append("manual_review")
+    elif not contenido_legible:
+        tags.append("no_legible")
+
+    if sufficiency_level == "full":
+        tags.append("suficiente")
+    elif sufficiency_level == "partial":
+        tags.append("parcial")
+    else:
+        tags.append("insuficiente")
+
+    if not tags:
+        return "valida"
+
+    return " | ".join(tags)
 
 
 def evaluar_entrega_automatica(
     submission: dict[str, Any],
     rutas_descargadas: list[str],
+    coursework: dict[str, Any],
+    autograding_config: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    Evalúa una entrega con reglas genéricas:
-    - base por entrega realizada
-    - puntos por adjunto
-    - score por contenido detectable
-    - penalización por tardanza
+    Evalúa una entrega con estrategia simple y configurable.
     """
+    weights = autograding_config.get("weights", {})
+    keywords_cfg = autograding_config.get("keywords", {})
+
     late = bool(submission.get("late", False))
+    entrego = submission.get("state") == "TURNED_IN"
     has_attachment = len(rutas_descargadas) > 0 or tiene_adjuntos(submission)
 
     texto_total: list[str] = []
@@ -1036,37 +1284,71 @@ def evaluar_entrega_automatica(
             archivos_leidos += 1
 
     texto_unido = "\n".join(texto_total)
-    analisis = analizar_contenido_texto(texto_unido)
+    analisis = analizar_contenido_texto(texto_unido, autograding_config=autograding_config)
 
-    penalty_late = PENALIZACION_TARDE if late else 0
+    penalty_late, days_late = calcular_penalizacion_tardanza(
+        submission=submission,
+        coursework=coursework,
+        autograding_config=autograding_config,
+    )
 
-    base_score = 60 if submission.get("state") == "TURNED_IN" else 0
-    attachment_score = 10 if has_attachment else 0
-    content_score = int(analisis["content_score"])
+    keyword_required_for_delivery = bool(
+        keywords_cfg.get("required_for_delivery_valid", False)
+    )
 
-    auto_grade = base_score + attachment_score + content_score - penalty_late
-    auto_grade = max(0, min(100, auto_grade))
+    delivery_valid_score = 0
+    if entrego and (not keyword_required_for_delivery or analisis["keywords_ok"]):
+        delivery_valid_score = int(weights.get("delivery_valid", 40))
 
-    feedback = construir_feedback(
+    evidence_score = (
+        int(weights.get("evidence_file_or_text", 20))
+        if (has_attachment or analisis["contenido_legible"])
+        else 0
+    )
+    readable_content_score = (
+        int(weights.get("readable_content", 20))
+        if analisis["contenido_legible"]
+        else 0
+    )
+    sufficiency_score = int(analisis["sufficiency_score"])
+
+    if not entrego:
+        auto_grade = 0
+        manual_review = False
+    else:
+        auto_grade = (
+            delivery_valid_score
+            + evidence_score
+            + readable_content_score
+            + sufficiency_score
+            - penalty_late
+        )
+        auto_grade = max(0, min(100, auto_grade))
+
+    feedback = construir_feedback_corto(
         late=late,
-        has_attachment=has_attachment,
-        archivos_leidos=archivos_leidos,
-        num_palabras=int(analisis["num_palabras"]),
-        penalty_late=penalty_late,
-        content_score=content_score,
-        auto_grade=auto_grade,
         manual_review=manual_review,
+        contenido_legible=bool(analisis["contenido_legible"]),
+        sufficiency_level=str(analisis["sufficiency_level"]),
     )
 
     return {
         "auto_grade": auto_grade,
         "feedback": feedback,
         "penalty_late": penalty_late,
+        "days_late": days_late,
         "has_attachment": str(has_attachment).lower(),
-        "content_score": content_score,
+        "delivery_valid_score": delivery_valid_score,
+        "evidence_score": evidence_score,
+        "readable_content_score": readable_content_score,
+        "content_score": sufficiency_score,
+        "minimum_sufficiency_score": sufficiency_score,
         "files_read_for_content": archivos_leidos,
         "detected_words": int(analisis["num_palabras"]),
+        "detected_characters": int(analisis["num_caracteres"]),
+        "keyword_hits": ", ".join(analisis["keyword_hits"]),
         "manual_review": str(manual_review).lower(),
+        "readable_content": str(bool(analisis["contenido_legible"])).lower(),
     }
 
 
@@ -1181,7 +1463,14 @@ def escribir_csv_resumen(csv_path: str, filas: list[dict[str, str]]) -> None:
                 "attached",
                 "has_attachment",
                 "manual_review",
+                "readable_content",
+                "days_late",
                 "penalty_late",
+                "delivery_valid_score",
+                "evidence_score",
+                "readable_content_score",
+                "minimum_sufficiency_score",
+                "keyword_hits",
                 "content_score",
                 "auto_grade",
                 "feedback",
@@ -1260,10 +1549,14 @@ def procesar_actividad(
         print("No hay entregas que coincidan con el filtro para esta actividad.")
         return
 
-    carpeta_actividad = os.path.join(
-        carpeta_base,
-        f"{limpiar_nombre_archivo(coursework_title)}_{coursework_id}",
-    )
+    nombre_carpeta_actividad = f"{limpiar_nombre_archivo(coursework_title)}_{coursework_id}"
+
+    # Si la carpeta_base ya apunta exactamente a esta actividad
+    # (caso descarga de una sola actividad), reutilízala tal cual.
+    if os.path.basename(os.path.normpath(carpeta_base)) == nombre_carpeta_actividad:
+        carpeta_actividad = carpeta_base
+    else:
+        carpeta_actividad = os.path.join(carpeta_base, nombre_carpeta_actividad)
 
     # Evita folders duplicados cuando se reprocesa la misma actividad.
     # Si la carpeta ya existe, se reconstruye limpia con la convención actual.
@@ -1328,6 +1621,8 @@ def procesar_actividad(
             evaluacion = evaluar_entrega_automatica(
                 submission=submission,
                 rutas_descargadas=rutas_descargadas,
+                coursework=coursework,
+                autograding_config=AUTOGRADING_CONFIG,
             )
         else:
             print("  adjuntos: no aplica, alumno sin entrega enviada")
@@ -1335,8 +1630,15 @@ def procesar_actividad(
                 "auto_grade": 0,
                 "feedback": "Alumno asignado pero sin entrega enviada. No se descargaron archivos ni se evaluó contenido.",
                 "penalty_late": 0,
+                "days_late": 0,
                 "has_attachment": "false",
                 "manual_review": "false",
+                "readable_content": "false",
+                "delivery_valid_score": 0,
+                "evidence_score": 0,
+                "readable_content_score": 0,
+                "minimum_sufficiency_score": 0,
+                "keyword_hits": "",
                 "content_score": 0,
                 "files_read_for_content": 0,
                 "detected_words": 0,
@@ -1344,6 +1646,7 @@ def procesar_actividad(
 
         print(f"  auto_grade: {evaluacion['auto_grade']}")
         print(f"  content_score: {evaluacion['content_score']}")
+        print(f"  readable_content: {evaluacion['readable_content']}")
         print(f"  manual_review: {evaluacion['manual_review']}")
         print(f"  penalty_late: {evaluacion['penalty_late']}")
 
@@ -1363,7 +1666,14 @@ def procesar_actividad(
                 "attached": str(tiene_adjuntos(submission)).lower(),
                 "has_attachment": str(evaluacion["has_attachment"]).lower(),
                 "manual_review": str(evaluacion["manual_review"]).lower(),
+                "readable_content": str(evaluacion["readable_content"]).lower(),
+                "days_late": str(evaluacion["days_late"]),
                 "penalty_late": str(evaluacion["penalty_late"]),
+                "delivery_valid_score": str(evaluacion["delivery_valid_score"]),
+                "evidence_score": str(evaluacion["evidence_score"]),
+                "readable_content_score": str(evaluacion["readable_content_score"]),
+                "minimum_sufficiency_score": str(evaluacion["minimum_sufficiency_score"]),
+                "keyword_hits": evaluacion["keyword_hits"],
                 "content_score": str(evaluacion["content_score"]),
                 "auto_grade": str(evaluacion["auto_grade"]),
                 "feedback": evaluacion["feedback"],
@@ -1376,6 +1686,8 @@ def procesar_actividad(
 # ==========================================================
 # Flujo principal
 # ==========================================================
+
+AUTOGRADING_CONFIG = cargar_config_autograding()
 
 def main() -> None:
     """
@@ -1460,14 +1772,9 @@ def main() -> None:
             f"después del filtro: {len(courseworks_filtradas)}"
         )
 
-        carpeta_base = os.path.join(
-            settings.download_root,
-            f"{course_name}_{course_id}",
+        carpeta_curso = os.path.normpath(
+            os.path.join(settings.download_root, f"{course_name}_{course_id}")
         )
-        carpeta_base = os.path.normpath(carpeta_base)
-
-        if not os.path.exists(carpeta_base):
-            asegurar_directorio(carpeta_base)
 
         perfiles_cache: dict[str, dict[str, str]] = {}
         filas_csv: list[dict[str, str]] = []
@@ -1481,6 +1788,19 @@ def main() -> None:
         if alcance_descarga == "single_coursework":
             selected_coursework = seleccionar_opcion(courseworks_filtradas, "una actividad")
             print(f"\n✅ Actividad seleccionada: {selected_coursework['display_name']}")
+
+            coursework_title = selected_coursework.get("title", f"actividad_{selected_coursework['id']}")
+            coursework_folder_name = (
+                f"{limpiar_nombre_archivo(coursework_title)}_{selected_coursework['id']}"
+            )
+
+            # Importante:
+            # para una sola actividad, la carpeta base de esta ejecución NO debe ser la carpeta
+            # histórica completa del curso. Se crea una salida dedicada únicamente para esa actividad.
+            carpeta_base = preparar_directorio_salida(
+                os.path.join(carpeta_curso, coursework_folder_name),
+                limpiar_si_existe=True,
+            )
 
             procesar_actividad(
                 classroom_service=classroom_service,
@@ -1496,9 +1816,16 @@ def main() -> None:
             )
 
             nombre_csv = "resumen_entregas.csv"
-            nombre_zip = f"{course_name}_{course_id}"
+            nombre_zip = coursework_folder_name
 
         elif alcance_descarga == "all_courseworks":
+            # Para exportación completa sí se usa la carpeta del curso,
+            # pero se limpia antes para que no arrastre histórico.
+            carpeta_base = preparar_directorio_salida(
+                carpeta_curso,
+                limpiar_si_existe=True,
+            )
+
             print(
                 f"\n✅ Se procesarán todas las actividades filtradas del curso: "
                 f"{len(courseworks_filtradas)}"

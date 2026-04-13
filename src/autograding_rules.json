@@ -1,0 +1,33 @@
+{
+  "weights": {
+    "delivery_valid": 40,
+    "evidence_file_or_text": 20,
+    "readable_content": 20,
+    "minimum_sufficiency": 20
+  },
+  "keywords": {
+    "enabled": true,
+    "list": [
+      "control",
+      "sistema",
+      "resumen"
+    ],
+    "minimum_matches": 1,
+    "required_for_delivery_valid": false
+  },
+  "minimum_sufficiency": {
+    "min_words_partial": 10,
+    "min_words_full": 50,
+    "min_chars_partial": 80,
+    "min_chars_full": 300,
+    "partial_score": 10,
+    "full_score": 20
+  },
+  "late_policy": {
+    "enabled": true,
+    "minor_days_threshold": 5,
+    "minor_penalty": 5,
+    "major_penalty": 10,
+    "fallback_penalty_when_late_without_due_date": 5
+  }
+}
